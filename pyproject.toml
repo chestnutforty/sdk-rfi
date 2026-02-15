@@ -1,0 +1,75 @@
+[project]
+name = "sdk-rfi"
+version = "0.1.0"
+description = "Python SDK for the RAND Forecasting Initiative (RFI) crowdsourced forecasting platform"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Chestnutforty", email = "dev@chestnutforty.com" },
+]
+keywords = ["sdk", "rfi", "rand", "infer", "forecasting", "prediction", "cultivate-labs"]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "typing-extensions>=4.10",
+]
+classifiers = [
+    "Typing :: Typed",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/chestnutforty/sdk-rfi"
+Repository = "https://github.com/chestnutforty/sdk-rfi"
+Documentation = "https://www.randforecastinginitiative.org"
+
+[tool.uv]
+managed = true
+required-version = ">=0.5.0"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["src/*"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sdk_rfi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "I",
+    "B",
+    "F401",
+    "E722",
+    "ARG",
+    "T201",
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["sdk_rfi", "tests"]
