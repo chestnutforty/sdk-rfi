@@ -1,9 +1,9 @@
-"""Integration tests against the live RFI API.
+"""Integration tests against the live RFI API via middleware enclave.
 
-These tests make REAL API calls and verify responses.
+These tests make REAL API calls through the middleware enclave.
 
 Run with:
-    RFI_EMAIL=... RFI_PASSWORD=... uv run pytest tests/test_integration.py -v
+    ENCLAVE_URL=... MIDDLEWARE_AUTH_SECRET=... uv run pytest tests/test_integration.py -v -s
 """
 
 from __future__ import annotations
@@ -14,36 +14,16 @@ import pytest
 
 from sdk_rfi import Client, AsyncClient
 
-# Skip all tests if credentials not set
+# Skip all tests if enclave is not configured for real dispatch
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("RFI_EMAIL") or not os.environ.get("RFI_PASSWORD"),
-    reason="RFI_EMAIL and RFI_PASSWORD not set",
+    not os.environ.get("ENCLAVE_URL")
+    or os.environ.get("ENCLAVE_URL", "").startswith("https://test-"),
+    reason="ENCLAVE_URL not configured for real dispatch",
 )
 
 
-class TestAuthentication:
-    """Test OAuth2 authentication."""
-
-    def test_auth_with_env_vars(self) -> None:
-        """Client authenticates using env vars."""
-        with Client() as client:
-            # Just creating the client should work
-            # Token is fetched lazily on first request
-            result = client.questions.list()
-            assert result is not None
-
-    def test_auth_with_explicit_credentials(self) -> None:
-        """Client authenticates using explicit credentials."""
-        with Client(
-            email=os.environ["RFI_EMAIL"],
-            password=os.environ["RFI_PASSWORD"],
-        ) as client:
-            result = client.questions.list()
-            assert result is not None
-
-
 class TestQuestions:
-    """Test questions resource."""
+    """Test questions resource via live enclave."""
 
     def test_list_active_questions(self) -> None:
         """List active questions returns results."""
@@ -62,12 +42,10 @@ class TestQuestions:
     def test_get_question(self) -> None:
         """Get a specific question by ID."""
         with Client() as client:
-            # First get a question ID from list
             listed = client.questions.list()
             assert listed.questions
             question_id = listed.questions[0].id
 
-            # Get the specific question
             question = client.questions.get(question_id)
             assert question is not None
             assert question.id == question_id
@@ -80,7 +58,6 @@ class TestQuestions:
             question = listed.questions[0]
             assert question.answers is not None
             assert len(question.answers) >= 2
-            # Check answer has probability
             answer = question.answers[0]
             assert answer.name
             assert answer.probability is not None
@@ -95,12 +72,11 @@ class TestQuestions:
 
 
 class TestPredictionSets:
-    """Test prediction sets resource."""
+    """Test prediction sets resource via live enclave."""
 
     def test_list_predictions_for_question(self) -> None:
         """List prediction sets for a question returns results."""
         with Client() as client:
-            # Get a question that has predictions
             questions = client.questions.list()
             question_id = questions.questions[0].id
 
@@ -134,7 +110,7 @@ class TestPredictionSets:
 
 
 class TestComments:
-    """Test comments resource."""
+    """Test comments resource via live enclave."""
 
     def test_list_comments(self) -> None:
         """List comments returns results."""
@@ -147,7 +123,6 @@ class TestComments:
                 commentable_type="Forecast::Question",
             )
             assert result is not None
-            # Comments may or may not exist for every question
             assert isinstance(result.comments, list)
 
 

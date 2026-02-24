@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping, TypeAlias
 
-import httpx
-
 __all__ = [
     "Headers",
     "QueryParams",
@@ -16,4 +14,4 @@ __all__ = [
 Headers: TypeAlias = Mapping[str, str]
 QueryParams: TypeAlias = Mapping[str, str | int | bool | None]
 RequestData: TypeAlias = Mapping[str, Any]
-Timeout: TypeAlias = float | httpx.Timeout | None
+Timeout: TypeAlias = float | None

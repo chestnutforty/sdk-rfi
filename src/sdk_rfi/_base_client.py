@@ -1,160 +1,111 @@
-"""Base HTTP client with OAuth2 authentication for Cultivate Labs API."""
+"""HTTP client infrastructure for sdk-rfi.
+
+All requests are dispatched through the ChestnutForty middleware enclave,
+which handles authentication (OAuth2 token management), rate limiting,
+and observability.
+"""
 
 from __future__ import annotations
 
+import base64
+import json
 import os
-import threading
-import time
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 import httpx
-from typing import Any
 
-from ._types import Headers, QueryParams, Timeout
-from ._exceptions import (
-    APIStatusError,
-    APITimeoutError,
-    APIConnectionError,
-    AuthenticationError,
-    BadRequestError,
-    PermissionDeniedError,
-    NotFoundError,
-    ConflictError,
-    RateLimitError,
-    InternalServerError,
-    SDKError,
+from chestnutforty_middleware import (
+    DispatchErrorCode,
+    HttpMethod,
+    HttpRequest,
+    HttpResponse,
+    ServiceRequest,
+    ServiceResponse,
 )
+from chestnutforty_middleware._signing import sign_request
+
+from ._exceptions import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    InternalServerError,
+    RateLimitError,
+    SDKError,
+    STATUS_CODE_TO_EXCEPTION,
+)
+
+if TYPE_CHECKING:
+    from ._types import QueryParams
 
 __all__ = ["BaseClient", "AsyncBaseClient"]
 
+DEFAULT_BASE_URL = "https://www.randforecastinginitiative.org"
 DEFAULT_TIMEOUT = 60.0
+SERVICE_NAME = "rfi"
 
-STATUS_CODE_TO_EXCEPTION: dict[int, type[APIStatusError]] = {
-    400: BadRequestError,
-    401: AuthenticationError,
-    403: PermissionDeniedError,
-    404: NotFoundError,
-    409: ConflictError,
-    429: RateLimitError,
+# Custom headers that the downstream RFI API expects
+_SDK_HEADERS: dict[str, str] = {
+    "Accept": "application/json",
+    "User-Agent": "sdk-rfi/0.1.0",
 }
 
-# Token refresh buffer: refresh 5 minutes before expiry
-TOKEN_REFRESH_BUFFER_SECONDS = 300
 
+def _read_enclave_config() -> tuple[str, bytes, str]:
+    """Read enclave config from environment variables.
 
-class _TokenManager:
-    """Thread-safe OAuth2 token manager.
-
-    Handles token acquisition and auto-refresh for the Cultivate Labs API.
+    Returns:
+        (dispatch_url, auth_secret, default_client_id)
     """
-
-    def __init__(self, base_url: str, email: str, password: str) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._email = email
-        self._password = password
-        self._access_token: str | None = None
-        self._expires_at: float = 0.0
-        self._lock = threading.Lock()
-
-    def get_token(self) -> str:
-        """Get a valid access token, refreshing if needed."""
-        with self._lock:
-            if self._access_token and time.time() < self._expires_at:
-                return self._access_token
-            return self._refresh_token()
-
-    def _refresh_token(self) -> str:
-        """Acquire a new OAuth token."""
-        response = httpx.post(
-            f"{self._base_url}/oauth/token",
-            data={
-                "grant_type": "password",
-                "email": self._email,
-                "password": self._password,
-            },
-            timeout=30.0,
+    enclave_url = os.environ.get("ENCLAVE_URL")
+    if not enclave_url:
+        raise RuntimeError(
+            "ENCLAVE_URL environment variable is required. "
+            "Set it to the middleware enclave URL."
         )
-        if not response.is_success:
-            raise SDKError(
-                f"Failed to authenticate with RFI: {response.status_code} - {response.text[:200]}"
-            )
 
-        data = response.json()
-        self._access_token = data["access_token"]
-        expires_in = data.get("expires_in", 7200)
-        self._expires_at = time.time() + expires_in - TOKEN_REFRESH_BUFFER_SECONDS
-        return self._access_token
+    secret_b64 = os.environ.get("MIDDLEWARE_AUTH_SECRET", "")
+    if not secret_b64:
+        raise RuntimeError(
+            "MIDDLEWARE_AUTH_SECRET environment variable is required. "
+            "Set it to the base64-encoded HMAC secret."
+        )
+
+    dispatch_url = enclave_url.rstrip("/") + "/dispatch"
+    auth_secret = base64.b64decode(secret_b64)
+    default_client_id = os.environ.get("MIDDLEWARE_CLIENT_ID", "")
+
+    return dispatch_url, auth_secret, default_client_id
 
 
 class BaseClient:
-    """Synchronous base client with OAuth2 authentication."""
+    """Synchronous HTTP client for the RFI API.
+
+    Routes all requests through the ChestnutForty middleware enclave.
+    The enclave handles OAuth2 authentication, rate limiting, and logging.
+    """
 
     def __init__(
         self,
         *,
-        base_url: str,
-        email: str | None = None,
-        password: str | None = None,
-        timeout: Timeout = DEFAULT_TIMEOUT,
-        headers: Headers | None = None,
-        proxy: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._custom_headers = headers or {}
 
-        # Resolve credentials
-        resolved_email = email or os.environ.get("RFI_EMAIL", "")
-        resolved_password = password or os.environ.get("RFI_PASSWORD", "")
-        if not resolved_email or not resolved_password:
-            raise SDKError(
-                "RFI credentials required. Set RFI_EMAIL and RFI_PASSWORD environment variables "
-                "or pass email/password to Client()."
-            )
-
-        self._token_manager = _TokenManager(self.base_url, resolved_email, resolved_password)
-
-        self._client = httpx.Client(
-            base_url=self.base_url,
-            timeout=timeout,
-            headers=self._build_default_headers(),
-            proxy=proxy,
+        self._dispatch_url, self._auth_secret, self._default_client_id = (
+            _read_enclave_config()
         )
+        self._http = httpx.Client(timeout=timeout)
 
-    def _build_default_headers(self) -> dict[str, str]:
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "sdk-rfi/0.1.0",
-        }
-        headers.update(self._custom_headers)
-        return headers
-
-    def _get_auth_headers(self) -> dict[str, str]:
-        token = self._token_manager.get_token()
-        return {"Authorization": f"Bearer {token}"}
-
-    def _handle_response(self, response: httpx.Response) -> Any:
-        if response.is_success:
-            content_type = response.headers.get("content-type", "")
-            if "application/json" in content_type:
-                return response.json()
-            return response.text
-
-        try:
-            body = response.json()
-            message = body.get("error", response.text) if isinstance(body, dict) else response.text
-        except Exception:
-            body = None
-            message = response.text
-
-        status_code = response.status_code
-        exception_class = STATUS_CODE_TO_EXCEPTION.get(status_code)
-
-        if exception_class:
-            raise exception_class(message, response=response, body=body)
-        elif status_code >= 500:
-            raise InternalServerError(message, response=response, body=body)
-        else:
-            raise APIStatusError(message, response=response, body=body)
+    def _build_params(self, params: QueryParams | None) -> dict[str, Any]:
+        """Build query parameters. No credentials -- enclave injects them."""
+        base_params: dict[str, Any] = {}
+        if params:
+            filtered = {k: v for k, v in params.items() if v is not None}
+            base_params.update(filtered)
+        return base_params
 
     def _request(
         self,
@@ -162,119 +113,141 @@ class BaseClient:
         path: str,
         *,
         params: QueryParams | None = None,
-        json: Any | None = None,
-        headers: Headers | None = None,
+        json_body: Any | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
+        """Make a request through the middleware enclave."""
         url = f"{self.base_url}{path}"
+        full_params = self._build_params(params)
 
-        if params:
-            params = {k: v for k, v in params.items() if v is not None}
+        # Build full endpoint URL with query string
+        if full_params:
+            endpoint = f"{url}?{urlencode(full_params)}"
+        else:
+            endpoint = url
 
-        # Merge auth headers
-        request_headers = self._get_auth_headers()
+        tool_name = path.strip("/").replace("/", "-")
+        client_id = self._default_client_id or f"rfi-{tool_name}"
+
+        # Merge SDK default headers with any per-request overrides
+        request_headers = dict(_SDK_HEADERS)
         if headers:
             request_headers.update(headers)
 
-        try:
-            response = self._client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json,
-                headers=request_headers,
-            )
-            return self._handle_response(response)
-        except httpx.TimeoutException as e:
-            raise APITimeoutError(e.request) from e
-        except httpx.ConnectError as e:
-            raise APIConnectionError(request=e.request) from e
+        http_request = HttpRequest(
+            method=HttpMethod(method),
+            endpoint=endpoint,
+            headers=request_headers,
+            timeout_ms=int(self.timeout * 1000),
+        )
+        if json_body is not None:
+            http_request.body = json_body
 
-    def get(self, path: str, *, params: QueryParams | None = None, headers: Headers | None = None) -> Any:
+        service_req = ServiceRequest(
+            service=SERVICE_NAME,
+            request=http_request,
+            app_name="rfi-sdk",
+            tool_name=tool_name,
+        )
+
+        service_resp = self._dispatch(service_req, client_id)
+        return self._handle_response(service_resp)
+
+    def _dispatch(self, request: ServiceRequest, client_id: str) -> ServiceResponse:
+        """Send a signed request to the enclave."""
+        body_bytes = json.dumps(
+            request.model_dump(mode="json"), separators=(",", ":")
+        ).encode()
+
+        headers = {"Content-Type": "application/json"}
+        headers.update(sign_request(body_bytes, self._auth_secret, client_id))
+
+        try:
+            resp = self._http.post(
+                self._dispatch_url, content=body_bytes, headers=headers
+            )
+        except httpx.TimeoutException:
+            raise APITimeoutError("Enclave request timed out")
+        except httpx.ConnectError:
+            raise APIConnectionError("Cannot reach enclave")
+
+        return self._parse_enclave_response(resp)
+
+    @staticmethod
+    def _parse_enclave_response(resp: httpx.Response) -> ServiceResponse:
+        """Parse the raw HTTP response from the enclave into a ServiceResponse."""
+        if resp.status_code == 401:
+            raise AuthenticationError(
+                "Enclave authentication failed", status_code=401
+            )
+        if resp.status_code >= 500:
+            raise InternalServerError(
+                f"Enclave returned {resp.status_code}", status_code=resp.status_code
+            )
+
+        try:
+            return ServiceResponse.model_validate(resp.json())
+        except Exception as exc:
+            raise SDKError(f"Failed to parse enclave response: {exc}") from exc
+
+    def _handle_response(self, sr: ServiceResponse) -> Any:
+        """Convert a ServiceResponse into a return value or raise an exception."""
+        if not sr.success:
+            assert sr.error is not None
+            _raise_dispatch_error(sr.error.code, sr.error.message)
+
+        assert sr.response is not None
+        if sr.response.status >= 400:
+            _raise_http_error(sr.response.status, sr.response.body)
+
+        return sr.response.body
+
+    def get(self, path: str, *, params: QueryParams | None = None, headers: dict[str, str] | None = None) -> Any:
+        """Make a GET request."""
         return self._request("GET", path, params=params, headers=headers)
 
-    def post(self, path: str, *, json: Any | None = None, params: QueryParams | None = None, headers: Headers | None = None) -> Any:
-        return self._request("POST", path, json=json, params=params, headers=headers)
+    def post(self, path: str, *, json: Any | None = None, params: QueryParams | None = None, headers: dict[str, str] | None = None) -> Any:
+        """Make a POST request."""
+        return self._request("POST", path, json_body=json, params=params, headers=headers)
 
     def close(self) -> None:
-        self._client.close()
+        """Close the underlying HTTP client."""
+        self._http.close()
 
-    def __enter__(self) -> "BaseClient":
+    def __enter__(self) -> BaseClient:
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         self.close()
 
 
 class AsyncBaseClient:
-    """Asynchronous base client with OAuth2 authentication."""
+    """Asynchronous HTTP client for the RFI API.
+
+    Routes all requests through the ChestnutForty middleware enclave.
+    """
 
     def __init__(
         self,
         *,
-        base_url: str,
-        email: str | None = None,
-        password: str | None = None,
-        timeout: Timeout = DEFAULT_TIMEOUT,
-        headers: Headers | None = None,
-        proxy: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._custom_headers = headers or {}
 
-        resolved_email = email or os.environ.get("RFI_EMAIL", "")
-        resolved_password = password or os.environ.get("RFI_PASSWORD", "")
-        if not resolved_email or not resolved_password:
-            raise SDKError(
-                "RFI credentials required. Set RFI_EMAIL and RFI_PASSWORD environment variables "
-                "or pass email/password to AsyncClient()."
-            )
-
-        # Reuse sync token manager (thread-safe, works in async context)
-        self._token_manager = _TokenManager(self.base_url, resolved_email, resolved_password)
-
-        self._client = httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=timeout,
-            headers=self._build_default_headers(),
-            proxy=proxy,
+        self._dispatch_url, self._auth_secret, self._default_client_id = (
+            _read_enclave_config()
         )
+        self._http = httpx.AsyncClient(timeout=timeout)
 
-    def _build_default_headers(self) -> dict[str, str]:
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "sdk-rfi/0.1.0",
-        }
-        headers.update(self._custom_headers)
-        return headers
-
-    def _get_auth_headers(self) -> dict[str, str]:
-        token = self._token_manager.get_token()
-        return {"Authorization": f"Bearer {token}"}
-
-    def _handle_response(self, response: httpx.Response) -> Any:
-        if response.is_success:
-            content_type = response.headers.get("content-type", "")
-            if "application/json" in content_type:
-                return response.json()
-            return response.text
-
-        try:
-            body = response.json()
-            message = body.get("error", response.text) if isinstance(body, dict) else response.text
-        except Exception:
-            body = None
-            message = response.text
-
-        status_code = response.status_code
-        exception_class = STATUS_CODE_TO_EXCEPTION.get(status_code)
-
-        if exception_class:
-            raise exception_class(message, response=response, body=body)
-        elif status_code >= 500:
-            raise InternalServerError(message, response=response, body=body)
-        else:
-            raise APIStatusError(message, response=response, body=body)
+    def _build_params(self, params: QueryParams | None) -> dict[str, Any]:
+        """Build query parameters. No credentials -- enclave injects them."""
+        base_params: dict[str, Any] = {}
+        if params:
+            filtered = {k: v for k, v in params.items() if v is not None}
+            base_params.update(filtered)
+        return base_params
 
     async def _request(
         self,
@@ -282,43 +255,128 @@ class AsyncBaseClient:
         path: str,
         *,
         params: QueryParams | None = None,
-        json: Any | None = None,
-        headers: Headers | None = None,
+        json_body: Any | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
+        """Make an async request through the middleware enclave."""
         url = f"{self.base_url}{path}"
+        full_params = self._build_params(params)
 
-        if params:
-            params = {k: v for k, v in params.items() if v is not None}
+        if full_params:
+            endpoint = f"{url}?{urlencode(full_params)}"
+        else:
+            endpoint = url
 
-        request_headers = self._get_auth_headers()
+        tool_name = path.strip("/").replace("/", "-")
+        client_id = self._default_client_id or f"rfi-{tool_name}"
+
+        # Merge SDK default headers with any per-request overrides
+        request_headers = dict(_SDK_HEADERS)
         if headers:
             request_headers.update(headers)
 
-        try:
-            response = await self._client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json,
-                headers=request_headers,
-            )
-            return self._handle_response(response)
-        except httpx.TimeoutException as e:
-            raise APITimeoutError(e.request) from e
-        except httpx.ConnectError as e:
-            raise APIConnectionError(request=e.request) from e
+        http_request = HttpRequest(
+            method=HttpMethod(method),
+            endpoint=endpoint,
+            headers=request_headers,
+            timeout_ms=int(self.timeout * 1000),
+        )
+        if json_body is not None:
+            http_request.body = json_body
 
-    async def get(self, path: str, *, params: QueryParams | None = None, headers: Headers | None = None) -> Any:
+        service_req = ServiceRequest(
+            service=SERVICE_NAME,
+            request=http_request,
+            app_name="rfi-sdk",
+            tool_name=tool_name,
+        )
+
+        service_resp = await self._dispatch(service_req, client_id)
+        return self._handle_response(service_resp)
+
+    async def _dispatch(
+        self, request: ServiceRequest, client_id: str
+    ) -> ServiceResponse:
+        """Send a signed request to the enclave (async)."""
+        body_bytes = json.dumps(
+            request.model_dump(mode="json"), separators=(",", ":")
+        ).encode()
+
+        headers = {"Content-Type": "application/json"}
+        headers.update(sign_request(body_bytes, self._auth_secret, client_id))
+
+        try:
+            resp = await self._http.post(
+                self._dispatch_url, content=body_bytes, headers=headers
+            )
+        except httpx.TimeoutException:
+            raise APITimeoutError("Enclave request timed out")
+        except httpx.ConnectError:
+            raise APIConnectionError("Cannot reach enclave")
+
+        return BaseClient._parse_enclave_response(resp)
+
+    def _handle_response(self, sr: ServiceResponse) -> Any:
+        """Convert a ServiceResponse into a return value or raise an exception."""
+        if not sr.success:
+            assert sr.error is not None
+            _raise_dispatch_error(sr.error.code, sr.error.message)
+
+        assert sr.response is not None
+        if sr.response.status >= 400:
+            _raise_http_error(sr.response.status, sr.response.body)
+
+        return sr.response.body
+
+    async def get(self, path: str, *, params: QueryParams | None = None, headers: dict[str, str] | None = None) -> Any:
+        """Make an async GET request."""
         return await self._request("GET", path, params=params, headers=headers)
 
-    async def post(self, path: str, *, json: Any | None = None, params: QueryParams | None = None, headers: Headers | None = None) -> Any:
-        return await self._request("POST", path, json=json, params=params, headers=headers)
+    async def post(self, path: str, *, json: Any | None = None, params: QueryParams | None = None, headers: dict[str, str] | None = None) -> Any:
+        """Make an async POST request."""
+        return await self._request("POST", path, json_body=json, params=params, headers=headers)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        """Close the underlying HTTP client."""
+        await self._http.aclose()
 
-    async def __aenter__(self) -> "AsyncBaseClient":
+    async def __aenter__(self) -> AsyncBaseClient:
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         await self.close()
+
+
+# ---------------------------------------------------------------------------
+# Shared error helpers
+# ---------------------------------------------------------------------------
+
+
+def _raise_dispatch_error(code: DispatchErrorCode, message: str) -> None:
+    """Map a middleware DispatchErrorCode to an SDK exception."""
+    if code == DispatchErrorCode.RATE_LIMITED:
+        raise RateLimitError(message, status_code=429)
+    if code == DispatchErrorCode.DOWNSTREAM_TIMEOUT:
+        raise APITimeoutError(message)
+    if code in (
+        DispatchErrorCode.DOWNSTREAM_UNREACHABLE,
+        DispatchErrorCode.ENCLAVE_UNAVAILABLE,
+    ):
+        raise APIConnectionError(message)
+    if code == DispatchErrorCode.AUTH_FAILED:
+        raise AuthenticationError(message, status_code=401)
+    if code == DispatchErrorCode.SERVICE_NOT_FOUND:
+        raise SDKError(f"Service not found: {message}")
+    raise SDKError(message)
+
+
+def _raise_http_error(status_code: int, body: Any) -> None:
+    """Map an HTTP status code to an SDK exception."""
+    message = f"HTTP {status_code}"
+    if isinstance(body, dict) and "error" in body:
+        message = body["error"]
+    elif isinstance(body, dict) and "error_message" in body:
+        message = body["error_message"]
+
+    exc_class = STATUS_CODE_TO_EXCEPTION.get(status_code, InternalServerError)
+    raise exc_class(message, status_code=status_code, body=body)

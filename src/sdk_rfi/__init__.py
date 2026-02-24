@@ -1,9 +1,11 @@
 """RFI SDK - Python SDK for the RAND Forecasting Initiative API.
 
+All requests are routed through the ChestnutForty middleware enclave.
+
 Usage:
     from sdk_rfi import Client
 
-    client = Client()  # Uses RFI_EMAIL and RFI_PASSWORD env vars
+    client = Client()  # Requires ENCLAVE_URL and MIDDLEWARE_AUTH_SECRET env vars
     questions = client.questions.list()
     question = client.questions.get(1234)
 """
