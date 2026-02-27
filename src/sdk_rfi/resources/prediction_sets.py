@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from .._utils import _resolve_cutoff_date
 from ..types.prediction_sets import PredictionSet, PredictionSetList
 
 if TYPE_CHECKING:
@@ -49,12 +50,13 @@ class PredictionSets:
         created_after: str | None = None,
         updated_before: str | None = None,
         updated_after: str | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> PredictionSetList:
         """List prediction sets (forecasts).
 
         BACKTESTING: Supported via created_before API param + client-side filtering.
-        Only returns forecasts made before cutoff_date.
+        Only returns forecasts made before cutoff_date. Set cutoff_date or
+        CUTOFF_DATE env var.
 
         Args:
             question_id: Filter by question ID.
@@ -66,7 +68,10 @@ class PredictionSets:
             updated_before: ISO8601 date.
             updated_after: ISO8601 date.
             cutoff_date: Filter to forecasts made before this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if question_id is not None:
             params["question_id"] = question_id
@@ -80,7 +85,7 @@ class PredictionSets:
         # Use cutoff_date as created_before if not explicitly set
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -107,7 +112,8 @@ class PredictionSets:
             has_more = False
 
         # Client-side filtering
-        prediction_sets = _filter_prediction_sets_by_cutoff(prediction_sets, cutoff_date)
+        if cutoff_date:
+            prediction_sets = _filter_prediction_sets_by_cutoff(prediction_sets, cutoff_date)
 
         return PredictionSetList(
             prediction_sets=prediction_sets,
@@ -133,12 +139,19 @@ class AsyncPredictionSets:
         created_after: str | None = None,
         updated_before: str | None = None,
         updated_after: str | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> PredictionSetList:
         """List prediction sets (forecasts).
 
         BACKTESTING: Supported via created_before API param + client-side filtering.
+        Set cutoff_date or CUTOFF_DATE env var.
+
+        Args:
+            cutoff_date: Filter to forecasts made before this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if question_id is not None:
             params["question_id"] = question_id
@@ -151,7 +164,7 @@ class AsyncPredictionSets:
 
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -177,7 +190,8 @@ class AsyncPredictionSets:
             prediction_sets = []
             has_more = False
 
-        prediction_sets = _filter_prediction_sets_by_cutoff(prediction_sets, cutoff_date)
+        if cutoff_date:
+            prediction_sets = _filter_prediction_sets_by_cutoff(prediction_sets, cutoff_date)
 
         return PredictionSetList(
             prediction_sets=prediction_sets,

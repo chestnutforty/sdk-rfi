@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from .._utils import _resolve_cutoff_date
 from ..types.questions import Question, QuestionList
 
 if TYPE_CHECKING:
@@ -60,12 +61,12 @@ class Questions:
         updated_before: str | None = None,
         updated_after: str | None = None,
         include_tag_ids: bool | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> QuestionList:
         """List forecasting questions.
 
         BACKTESTING: Supported via created_before API param + client-side
-        filtering on published_at.
+        filtering on published_at. Set cutoff_date or CUTOFF_DATE env var.
 
         Args:
             status: Filter by status - 'closed', 'all', or omit for active only.
@@ -81,7 +82,10 @@ class Questions:
             updated_after: ISO8601 date.
             include_tag_ids: Include tag IDs in response.
             cutoff_date: Filter to data available as of this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if status is not None:
             params["status"] = status
@@ -101,7 +105,7 @@ class Questions:
         # Use cutoff_date as created_before if not explicitly set
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -131,7 +135,8 @@ class Questions:
             has_more = False
 
         # Client-side filtering by cutoff_date
-        questions = _filter_questions_by_cutoff(questions, cutoff_date)
+        if cutoff_date:
+            questions = _filter_questions_by_cutoff(questions, cutoff_date)
 
         return QuestionList(
             questions=questions,
@@ -143,18 +148,29 @@ class Questions:
         self,
         question_id: int,
         *,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
-    ) -> Question:
+        cutoff_date: str | None = None,
+    ) -> Question | None:
         """Get a single question by ID.
 
-        BACKTESTING: Supported - returns the question if it existed before cutoff_date.
+        BACKTESTING: Supported - returns the question if it existed before
+        cutoff_date, or None if the question was published after the cutoff.
+        Set cutoff_date or CUTOFF_DATE env var.
 
         Args:
             question_id: The question ID.
             cutoff_date: Filter to data available as of this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         data = self._client.get(f"/api/v1/questions/{question_id}")
         question = Question.model_validate(data)
+
+        if cutoff_date:
+            filtered = _filter_questions_by_cutoff([question], cutoff_date)
+            if not filtered:
+                return None
+
         return question
 
 
@@ -179,13 +195,19 @@ class AsyncQuestions:
         updated_before: str | None = None,
         updated_after: str | None = None,
         include_tag_ids: bool | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> QuestionList:
         """List forecasting questions.
 
         BACKTESTING: Supported via created_before API param + client-side
-        filtering on published_at.
+        filtering on published_at. Set cutoff_date or CUTOFF_DATE env var.
+
+        Args:
+            cutoff_date: Filter to data available as of this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if status is not None:
             params["status"] = status
@@ -204,7 +226,7 @@ class AsyncQuestions:
 
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -232,7 +254,8 @@ class AsyncQuestions:
             questions = []
             has_more = False
 
-        questions = _filter_questions_by_cutoff(questions, cutoff_date)
+        if cutoff_date:
+            questions = _filter_questions_by_cutoff(questions, cutoff_date)
 
         return QuestionList(
             questions=questions,
@@ -244,12 +267,27 @@ class AsyncQuestions:
         self,
         question_id: int,
         *,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
-    ) -> Question:
+        cutoff_date: str | None = None,
+    ) -> Question | None:
         """Get a single question by ID.
 
-        BACKTESTING: Supported - returns the question if it existed before cutoff_date.
+        BACKTESTING: Supported - returns the question if it existed before
+        cutoff_date, or None if the question was published after the cutoff.
+        Set cutoff_date or CUTOFF_DATE env var.
+
+        Args:
+            question_id: The question ID.
+            cutoff_date: Filter to data available as of this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         data = await self._client.get(f"/api/v1/questions/{question_id}")
         question = Question.model_validate(data)
+
+        if cutoff_date:
+            filtered = _filter_questions_by_cutoff([question], cutoff_date)
+            if not filtered:
+                return None
+
         return question

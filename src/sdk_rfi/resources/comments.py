@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from .._utils import _resolve_cutoff_date
 from ..types.comments import Comment, CommentList
 
 if TYPE_CHECKING:
@@ -46,11 +47,12 @@ class Comments:
         page: int | None = None,
         created_before: str | None = None,
         created_after: str | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> CommentList:
         """List comments.
 
         BACKTESTING: Supported via created_before API param + client-side filtering.
+        Set cutoff_date or CUTOFF_DATE env var.
 
         Args:
             commentable_id: Filter by the ID of the commented object (e.g., question ID).
@@ -59,7 +61,10 @@ class Comments:
             created_before: ISO8601 date.
             created_after: ISO8601 date.
             cutoff_date: Filter to comments made before this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if commentable_id is not None:
             params["commentable_id"] = commentable_id
@@ -70,7 +75,7 @@ class Comments:
 
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -92,7 +97,8 @@ class Comments:
             comments = []
             has_more = False
 
-        comments = _filter_comments_by_cutoff(comments, cutoff_date)
+        if cutoff_date:
+            comments = _filter_comments_by_cutoff(comments, cutoff_date)
 
         return CommentList(
             comments=comments,
@@ -115,12 +121,19 @@ class AsyncComments:
         page: int | None = None,
         created_before: str | None = None,
         created_after: str | None = None,
-        cutoff_date: str = datetime.now().strftime("%Y-%m-%d"),
+        cutoff_date: str | None = None,
     ) -> CommentList:
         """List comments.
 
         BACKTESTING: Supported via created_before API param + client-side filtering.
+        Set cutoff_date or CUTOFF_DATE env var.
+
+        Args:
+            cutoff_date: Filter to comments made before this date (YYYY-MM-DD).
+                         Overridden by CUTOFF_DATE environment variable if set.
         """
+        cutoff_date = _resolve_cutoff_date(cutoff_date)
+
         params: dict = {}
         if commentable_id is not None:
             params["commentable_id"] = commentable_id
@@ -131,7 +144,7 @@ class AsyncComments:
 
         if created_before is not None:
             params["created_before"] = created_before
-        else:
+        elif cutoff_date:
             params["created_before"] = f"{cutoff_date}T23:59:59"
 
         if created_after is not None:
@@ -153,7 +166,8 @@ class AsyncComments:
             comments = []
             has_more = False
 
-        comments = _filter_comments_by_cutoff(comments, cutoff_date)
+        if cutoff_date:
+            comments = _filter_comments_by_cutoff(comments, cutoff_date)
 
         return CommentList(
             comments=comments,
